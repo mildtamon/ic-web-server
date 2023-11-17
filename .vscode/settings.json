@@ -1,0 +1,10 @@
+{
+    "files.associations": {
+        "ctype.h": "c",
+        "pcsa_net.h": "c",
+        "stdlib.h": "c",
+        "parse.h": "c",
+        "stdio.h": "c",
+        "ctime": "c"
+    }
+}

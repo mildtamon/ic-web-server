@@ -61,10 +61,10 @@ int main(int argc, char* argv[]) {
         /* Close this end, done writing. */
         if (close(p2cFds[1]) < 0) fail_exit("close p2c[01] failed.");
 
-        char buf[BUFSIZE+1];
+        char buf[MAXBUF+1];
         ssize_t numRead;
         /* Begin reading from the child */
-        while ((numRead = read(c2pFds[0], buf, BUFSIZE))>0) {
+        while ((numRead = read(c2pFds[0], buf, MAXBUF))>0) {
             printf("Parent saw %ld bytes from child...\n", numRead);
             buf[numRead] = '\x0'; /* Printing hack; won't work with binary data */
             printf("-------\n");
