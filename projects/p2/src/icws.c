@@ -10,6 +10,8 @@
 #include <time.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <pthread.h>
+#include <poll.h>
 #include "parse.h"
 
 #include "pcsa_net.h"
@@ -20,6 +22,27 @@ char port[MAXBUF];
 char root[MAXBUF];
 char path[MAXBUF];
 typedef struct sockaddr SA;
+
+// THREAD
+#define MAXTHREAD 256
+#define MAXTASK 256
+
+int numThreads;
+int timeout;
+int numTasks = 0;
+
+pthread_t thread_pool[MAXTHREAD];
+
+pthread_mutex_t mutexQueue = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t mutexParse = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t threadCondition = PTHREAD_COND_INITIALIZER;
+
+struct survival_bag{
+	struct sockaddr_storage clientAddr;
+	int connFd;
+    char address[MAXBUF];
+};
+struct survival_bag* taskQueue[MAXTASK];
 
 // get status code and description
 char* statusCode(int code) {
@@ -136,7 +159,9 @@ void serve_http(int connFd, char* rootFolder){
    	    if(strcmp(line, "\r\n") == 0) break;
     }
 
+    pthread_mutex_lock(&mutexParse);
     Request *request = parse(buf, MAXBUF, connFd);
+    pthread_mutex_unlock(&mutexParse);
 
     if(request == NULL) {    // bad request
         write_header(connFd, NULL, 400);
@@ -160,6 +185,24 @@ void serve_http(int connFd, char* rootFolder){
     free(request);
 }	
 
+void* handler(void *arg) {
+    for (;;) {
+        pthread_mutex_lock(&mutexQueue);
+        while(numTasks == 0) {
+            pthread_cond_wait(&threadCondition, &mutexQueue);
+        }
+        // dequeue
+        struct survival_bag task = *taskQueue[0];
+        numTasks--;
+        for(int i = 0; i < numTasks; i++){
+            taskQueue[i] = taskQueue[i+1];
+		}
+        pthread_mutex_unlock(&mutexQueue);
+        serve_http(task.connFd, root);
+        close(task.connFd);
+    }
+}
+
 int getOption(int argc, char **argv) {
     int getopt;
     int option_index = 0;
@@ -167,13 +210,17 @@ int getOption(int argc, char **argv) {
     struct option long_options[] = {
         { "port", required_argument, 0, 'p' },
         { "root", required_argument, 0, 'r' },
+        { "numThreads", required_argument, 0, 'n' },
+        { "timeout", required_argument, 0, 't' },
         { NULL, 0, NULL, 0 }
     };
 
-    while((getopt = getopt_long(argc, argv, "p:r", long_options, &option_index)) != -1) {
+    while((getopt = getopt_long(argc, argv, "p:r:n:t", long_options, &option_index)) != -1) {
         switch (getopt) {
             case 'p': strcpy(port, optarg); break;
             case 'r': strcpy(root, optarg); break;
+            case 'n': numThreads = atoi(optarg); break;
+            case 't': timeout = atoi(optarg); break;
             default:
                 printf("Invalid option\n");
                 exit(0);
@@ -186,13 +233,22 @@ int main(int argc, char* argv[]) {
 
     getOption(argc, argv);
 
-    if(strlen(port) == 0 || strlen(root) == 0) {
-        printf("Required both --port and --root\n");
+    if(strlen(port) == 0 || strlen(root) == 0 || numThreads <= 0) {
+        printf("Required both --port, --root, and --numThreads\n");
         exit(0);
     }
 
+    pthread_mutex_init(&mutexParse, NULL);
+
     // an fd for listening for incoming connn
     int listenFd = open_listenfd(port);
+    
+    // create threadpool
+    for (int i = 0; i < numThreads; i++) {
+        if(pthread_create(&thread_pool[i], NULL, handler, NULL) != 0){
+    		printf("Fail creating thread");
+    	}
+    }
 
     for (;;) {
         struct sockaddr_storage clientAddr; // to store addr of the client
@@ -201,6 +257,9 @@ int main(int argc, char* argv[]) {
         // ...gonna block until someone connects to our socket
         int connFd = accept(listenFd, (SA *) &clientAddr, &clientLen);
 
+        struct survival_bag *context = (struct survival_bag *) malloc(sizeof(struct survival_bag));
+        context->connFd = connFd;
+
         // print the address of the incoming client
         char hostBuf[MAXBUF], svcBuf[MAXBUF];
         if (getnameinfo((SA *) &clientAddr, clientLen, hostBuf, MAXBUF, svcBuf, MAXBUF, 0) == 0) 
@@ -208,9 +267,24 @@ int main(int argc, char* argv[]) {
         else 
             printf("Connection from UNKNOWN.");
         
-        serve_http(connFd, root);
-        close(connFd);
+        // enqueue
+        pthread_mutex_lock(&mutexQueue);
+       	taskQueue[numTasks] = context;
+       	numTasks++;
+        pthread_mutex_unlock(&mutexQueue);
+        pthread_cond_signal(&threadCondition);
+        // serve_http(connFd, root);
+        // close(connFd);
     }
 
+    for(int i = 0;i < numThreads;i++){
+    	if(pthread_join(thread_pool[i],NULL) != 0){
+    		printf("Failed to join thread");
+    	}
+    }
+
+    pthread_mutex_destroy(&mutexQueue);
+    pthread_mutex_destroy(&mutexParse);
+    pthread_cond_destroy(&threadCondition);
     return 0;
 }
